@@ -1,72 +1,54 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.Linq;
 using Emgu.CV;
 using Emgu.CV.CvEnum;
-using Emgu.CV.Structure;
+using Emgu.CV.Util;
+using StickersDetector.Models.Shapes;
 
 namespace StickersDetector.bl.OpenCV
 {
-      /// <summary>
-      /// Utility class for rotating images to align objects
-      /// parallel to the screen axes.
-      /// </summary>
-      public static class ImageRotator
-      {
-            /// <summary>
-            /// Rotates the image by the given angle (in degrees) around its center.
-            /// Positive angle = clockwise rotation.
-            /// </summary>
-            /// <param name="image">Input image</param>
-            /// <param name="rotationDeg">
-            /// Rotation angle in degrees.
-            /// To align an object, pass -objectRotationDeg.
-            /// </param>
-            /// <returns>New rotated image</returns>
-            public static Mat Rotate(Mat image, double rotationDeg)
+    public static class ImageRotator
+    {
+        public static Mat ExtractAndAlignLabel(Mat image, IReadOnlyList<Point2D> corners)
+        {
+            if (image == null || image.IsEmpty)
+                throw new ArgumentException("Image is null or empty");
+
+            if (corners == null || corners.Count != 4)
+                throw new ArgumentException("Must provide exactly 4 corners");
+
+            // 1. המרת הפינות לפורמט PointF ש-OpenCV מכיר
+            var srcPoints = corners.Select(p => new PointF(p.X, p.Y)).ToArray();
+
+            // 2. חישוב מימדי המדבקה (רוחב וגובה) לפי המרחקים בין הפינות
+            float width = GetDistance(srcPoints[0], srcPoints[1]);
+            float height = GetDistance(srcPoints[0], srcPoints[3]);
+
+            // 3. הגדרת נקודות היעד - מלבן ישר שמתחיל ב-(0,0)
+            var dstPoints = new PointF[]
             {
-                  if (image == null || image.IsEmpty)
-                        throw new ArgumentException("Image is null or empty", nameof(image));
+                new PointF(0, 0),
+                new PointF(width, 0),
+                new PointF(width, height),
+                new PointF(0, height)
+            };
 
-                  // Image center
-                  var center = new PointF(
-                      image.Width / 2f,
-                      image.Height / 2f);
+            // 4. יצירת מטריצת הטרנספורמציה וביצוע החיתוך
+            using var srcVec = new VectorOfPointF(srcPoints);
+            using var dstVec = new VectorOfPointF(dstPoints);
+            using var matrix = CvInvoke.GetPerspectiveTransform(srcVec, dstVec);
 
-                  // // Rotation matrix (negative angle aligns object)
-                  // using var rotationMatrix =
-                  //     CvInvoke.GetRotationMatrix2D(center, rotationDeg, 1.0);
+            var result = new Mat();
+            CvInvoke.WarpPerspective(image, result, matrix, new Size((int)width, (int)height));
 
-                  // var result = new Mat();
+            return result;
+        }
 
-                  // CvInvoke.WarpAffine(
-                  //     image,
-                  //     result,
-                  //     rotationMatrix,
-                  //     image.Size,
-                  //     Inter.Linear,
-                  //     Warp.Default,
-                  //     BorderType.Constant,
-                  //     new MCvScalar(0, 0, 0));
-
-                  // return result;
-                  var rotationMatrix = new Mat(); 
-                  CvInvoke.GetRotationMatrix2D(center, rotationDeg, 1.0, rotationMatrix);
-
-                  using (rotationMatrix) 
-                  {
-                        var result = new Mat();
-                        CvInvoke.WarpAffine(
-                            image,
-                            result,
-                            rotationMatrix,
-                            image.Size,
-                            Inter.Linear,
-                            Warp.Default,
-                            BorderType.Constant,
-                            new MCvScalar(0, 0, 0));
-
-                        return result;
-                  }
-            }
-      }
+        private static float GetDistance(PointF p1, PointF p2)
+        {
+            return (float)Math.Sqrt(Math.Pow(p2.X - p1.X, 2) + Math.Pow(p2.Y - p1.Y, 2));
+        }
+    }
 }

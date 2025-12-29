@@ -2,7 +2,7 @@ using StickersDetector.Models;
 using StickersDetector.bl.OpenCV;
 using Emgu.CV;
 using Emgu.CV.Structure;
-using System.Drawing; 
+using System.Drawing;
 var builder = WebApplication.CreateBuilder(args);
 
 // Add controllers
@@ -53,21 +53,24 @@ foreach (var corner in detection.Corners)
 
 if (detection != null)
 {
-    // 1. המרת הפינות מ-Point2D ל-System.Drawing.Point עבור Emgu.CV
-    var points = detection.Corners
-        .Select(p => new System.Drawing.Point(p.X, p.Y))
-        .ToArray();
+      var points = detection.Corners
+          .Select(p => new System.Drawing.Point(p.X, p.Y))
+          .ToArray();
 
-    // 2. ציור המרובע על התמונה המקורית (בצבע ירוק, עובי 3)
-    // הערה: נשתמש ב-true כדי לסגור את הצורה בין הנקודה האחרונה לראשונה
-    CvInvoke.Polylines(image, points, true, new MCvScalar(0, 255, 0), 3);
 
-    // 3. שמירת התמונה עם הסימון לדיסק (לצורך בדיקה ב-WSL)
-    string markedPath = "example-pictures/marked_result.jpg";
-    CvInvoke.Imwrite(markedPath, image);
-    Console.WriteLine($"Marked image saved to: {markedPath}");
+      CvInvoke.Polylines(image, points, true, new MCvScalar(0, 255, 0), 3);
+
+      string markedPath = "example-pictures/marked_result.jpg";
+      CvInvoke.Imwrite(markedPath, image);
+      Console.WriteLine($"Label {detection.LabelName} found. Extracting...");
+
+      using var finalLabel = ImageRotator.ExtractAndAlignLabel(image, detection.Corners);
+
+      string finalPath = "example-pictures/final_crop.jpg";
+      CvInvoke.Imwrite(finalPath, finalLabel);
+
+      Console.WriteLine($"Aligned and cropped label saved to: {finalPath}");
 }
-
 
 
 app.Run();
