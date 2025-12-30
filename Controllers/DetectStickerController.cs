@@ -20,9 +20,11 @@ namespace StickersDetector.Controllers
         [HttpPost]
         public async Task<IActionResult> DetectSticker([FromForm] IFormFile image, [FromForm] string labelName)
         {
+            Console.WriteLine("Got new Message");
             // 1. Basic validation
             if (image == null || image.Length == 0) return BadRequest("Image file is missing");
             if (string.IsNullOrEmpty(labelName)) return BadRequest("labelName is required");
+            Console.WriteLine("Got new Message");
 
             try
             {
@@ -36,12 +38,15 @@ namespace StickersDetector.Controllers
 
                 if (inputImage.IsEmpty) return BadRequest("Invalid image format");
 
+
                 // 3. Perform sticker detection
+                Console.WriteLine($"[DEBUG] Attempting to detect label: '{labelName}'...");
+
                 var detection = _labelDetector.Detect(inputImage, labelName);
 
-                if (detection == null || !detection.IsReliable)
+                if (detection == null)
                 {
-                    return NotFound(new { message = $"Label '{labelName}' not detected or confidence too low." });
+                    return NotFound(new { message = $"Label '{labelName}' not detected or confidence too low. detection: {detection}" });
                 }
 
                 // 4. Crop and align the label using the detected corners

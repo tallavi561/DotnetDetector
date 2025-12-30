@@ -8,6 +8,7 @@ using Emgu.CV.CvEnum;
 using Emgu.CV.Features2D;
 using Emgu.CV.Structure;
 using Emgu.CV.Util;
+using Microsoft.AspNetCore.Authentication;
 using StickersDetector.Models;
 using StickersDetector.Models.Shapes;
 
@@ -83,10 +84,17 @@ namespace StickersDetector.bl.OpenCV
             double downscale = 0.5)
         {
             if (!_labels.TryGetValue(labelName, out var label))
+            {
+                Console.WriteLine($"Unknown label: {labelName}, return");
                 throw new KeyNotFoundException($"Unknown label: {labelName}");
+            }
 
             if (image == null || image.IsEmpty)
+            {   
+                Console.WriteLine("Input image is empty", nameof(image));
                 throw new ArgumentException("Input image is empty", nameof(image));
+            }
+            Console.WriteLine("preprocessing!");
 
             // --- Downscale for performance ---
             using var workImage = new Mat();
@@ -96,10 +104,15 @@ namespace StickersDetector.bl.OpenCV
             using var keypoints = new VectorOfKeyPoint();
             using var descriptors = new Mat();
 
+            Console.WriteLine("Starting to detect!");
             _sift.DetectAndCompute(workImage, null, keypoints, descriptors, false);
+            Console.WriteLine("detection succeed!");
 
             if (descriptors.IsEmpty || keypoints.Size < minMatches)
+            {
+                Console.WriteLine($"descriptors.IsEmpty {descriptors.IsEmpty} || keypoints.Size {keypoints.Size} < minMatches {minMatches}");
                 return null;
+            }
 
             // --- KNN matching + Lowe ratio test ---
             using var matcher = new BFMatcher(DistanceType.L2, crossCheck: false);
@@ -152,7 +165,10 @@ namespace StickersDetector.bl.OpenCV
                 inlierMask);
 
             if (homography == null || homography.IsEmpty)
+            {
+                Console.WriteLine("homography == null || homography.IsEmpty");
                 return null;
+            }
 
             // --- Transform template corners ---
             var tplCorners = new[]
@@ -169,12 +185,18 @@ namespace StickersDetector.bl.OpenCV
             CvInvoke.PerspectiveTransform(tplVec, imgVec, homography);
             var corners = imgVec.ToArray();
 
+            Console.WriteLine("Validate bounds");
             // Validate bounds
             if (!corners.All(p =>
                 p.X >= 0 && p.X < image.Width &&
                 p.Y >= 0 && p.Y < image.Height))
+            {
+                Console.WriteLine("!corners.All .. ");
                 return null;
+            }
 
+
+            Console.WriteLine("Quality metrics");
             // --- Quality metrics ---
             var maskBytes = new byte[inlierMask.Rows];
             inlierMask.CopyTo(maskBytes);
@@ -187,6 +209,8 @@ namespace StickersDetector.bl.OpenCV
                 .Select(p => new Point2D((int)Math.Round(p.X), (int)Math.Round(p.Y)))
                 .ToList()
                 .AsReadOnly();
+            
+            Console.WriteLine($"resultCorners: {resultCorners}");
 
             return new LabelDetectionResult(
                 labelName: label.Name,
