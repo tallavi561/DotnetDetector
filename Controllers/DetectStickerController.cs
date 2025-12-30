@@ -12,7 +12,6 @@ namespace StickersDetector.Controllers
     {
         private readonly LabelDetector _labelDetector;
 
-        // הזרקת ה-Detector שנרשם ב-Program.cs
         public DetectStickerController(LabelDetector labelDetector)
         {
             _labelDetector = labelDetector;
@@ -21,13 +20,13 @@ namespace StickersDetector.Controllers
         [HttpPost]
         public async Task<IActionResult> DetectSticker([FromForm] IFormFile image, [FromForm] string labelName)
         {
-            // 1. וולידציה בסיסית
+            // 1. Basic validation
             if (image == null || image.Length == 0) return BadRequest("Image file is missing");
             if (string.IsNullOrEmpty(labelName)) return BadRequest("labelName is required");
 
             try
             {
-                // 2. קריאת הקובץ למערך בייטים והמרה ל-Mat של OpenCV
+                // 2. Read the file into a byte array and convert to an OpenCV Mat
                 using var memoryStream = new MemoryStream();
                 await image.CopyToAsync(memoryStream);
                 byte[] imageBytes = memoryStream.ToArray();
@@ -37,7 +36,7 @@ namespace StickersDetector.Controllers
 
                 if (inputImage.IsEmpty) return BadRequest("Invalid image format");
 
-                // 3. ביצוע זיהוי המדבקה
+                // 3. Perform sticker detection
                 var detection = _labelDetector.Detect(inputImage, labelName);
 
                 if (detection == null || !detection.IsReliable)
@@ -45,14 +44,13 @@ namespace StickersDetector.Controllers
                     return NotFound(new { message = $"Label '{labelName}' not detected or confidence too low." });
                 }
 
-                // 4. חיתוך ויישור המדבקה בעזרת הפינות שזוהו
+                // 4. Crop and align the label using the detected corners
                 using var alignedLabel = ImageRotator.ExtractAndAlignLabel(inputImage, detection.Corners);
 
-                // 5. המרת התוצאה חזרה לבייטים כדי להחזיר תמונה ב-API
-                using var outputStream = new MemoryStream();
+                // 5. Convert the result back to bytes to return the image via API                using var outputStream = new MemoryStream();
                 byte[] resultBytes = CvInvoke.Imencode(".jpg", alignedLabel);
 
-                // החזרת קובץ תמונה ישירות לדפדפן/לקוח
+                // Return the image file directly to the client
                 return File(resultBytes, "image/jpeg", $"detected_{labelName}.jpg");
             }
             catch (KeyNotFoundException)
