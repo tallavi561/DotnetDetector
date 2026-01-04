@@ -72,10 +72,10 @@ namespace StickersDetector.bl.OpenCV
         }
 
         /// <summary>
-        /// Detects a specific label in the given image.
-        /// Returns null if not found or not reliable.
+        /// Detects multiple instances of a specific label in the given image.
+        /// Returns an empty list if none are found.
         /// </summary>
-        public LabelDetectionResult? Detect(
+        public List<LabelDetectionResult> Detect(
             Mat image,
             string labelName,
             int minMatches = 15,
@@ -83,142 +83,129 @@ namespace StickersDetector.bl.OpenCV
             double ransacThreshold = 5.0,
             double downscale = 0.5)
         {
+            var results = new List<LabelDetectionResult>();
+
             if (!_labels.TryGetValue(labelName, out var label))
             {
-                Console.WriteLine($"Unknown label: {labelName}, return");
                 throw new KeyNotFoundException($"Unknown label: {labelName}");
             }
 
             if (image == null || image.IsEmpty)
-            {   
-                Console.WriteLine("Input image is empty", nameof(image));
+            {
                 throw new ArgumentException("Input image is empty", nameof(image));
             }
-            Console.WriteLine("preprocessing!");
 
             // --- Downscale for performance ---
             using var workImage = new Mat();
             CvInvoke.Resize(image, workImage, new Size(), downscale, downscale, Inter.Area);
 
-            // --- Extract features from input image ---
-            using var keypoints = new VectorOfKeyPoint();
-            using var descriptors = new Mat();
+            // --- Extract features from input image (Once for all potential instances) ---
+            using var sceneKeypoints = new VectorOfKeyPoint();
+            using var sceneDescriptors = new Mat();
 
-            Console.WriteLine("Starting to detect!");
-            _sift.DetectAndCompute(workImage, null, keypoints, descriptors, false);
-            Console.WriteLine("detection succeed!");
+            _sift.DetectAndCompute(workImage, null, sceneKeypoints, sceneDescriptors, false);
 
-            if (descriptors.IsEmpty || keypoints.Size < minMatches)
+            if (sceneDescriptors.IsEmpty || sceneKeypoints.Size < minMatches)
             {
-                Console.WriteLine($"descriptors.IsEmpty {descriptors.IsEmpty} || keypoints.Size {keypoints.Size} < minMatches {minMatches}");
-                return null;
+                return results;
             }
 
             // --- KNN matching + Lowe ratio test ---
             using var matcher = new BFMatcher(DistanceType.L2, crossCheck: false);
             using var knnMatches = new VectorOfVectorOfDMatch();
+            matcher.KnnMatch(label.Descriptors, sceneDescriptors, knnMatches, 2, null);
 
-            matcher.KnnMatch(label.Descriptors, descriptors, knnMatches, 2, null);
-
-            var goodMatches = new List<MDMatch>();
-
+            var remainingMatches = new List<MDMatch>();
             for (int i = 0; i < knnMatches.Size; i++)
             {
                 using var v = knnMatches[i];
-                if (v.Size < 2)
-                    continue;
-
-                var m = v[0];
-                var n = v[1];
-
-                if (m.Distance < ratioThreshold * n.Distance)
-                    goodMatches.Add(m);
+                if (v.Size < 2) continue;
+                if (v[0].Distance < ratioThreshold * v[1].Distance)
+                    remainingMatches.Add(v[0]);
             }
 
-            if (goodMatches.Count < minMatches)
-                return null;
-
-            // --- Build point correspondences ---
-            var srcPoints = new PointF[goodMatches.Count];
-            var dstPoints = new PointF[goodMatches.Count];
-
-            for (int i = 0; i < goodMatches.Count; i++)
+            // --- הוספת לולאה למציאת מופעים מרובים ---
+            while (remainingMatches.Count >= minMatches)
             {
-                srcPoints[i] =
-                    label.Keypoints[goodMatches[i].QueryIdx].Point;
+                var srcPoints = new PointF[remainingMatches.Count];
+                var dstPoints = new PointF[remainingMatches.Count];
 
-                var p = keypoints[goodMatches[i].TrainIdx].Point;
-                dstPoints[i] = new PointF(
-                    (float)(p.X / downscale),
-                    (float)(p.Y / downscale));
+                for (int i = 0; i < remainingMatches.Count; i++)
+                {
+                    srcPoints[i] = label.Keypoints[remainingMatches[i].QueryIdx].Point;
+                    var p = sceneKeypoints[remainingMatches[i].TrainIdx].Point;
+                    dstPoints[i] = new PointF((float)(p.X / downscale), (float)(p.Y / downscale));
+                }
+
+                using var srcVec = new VectorOfPointF(srcPoints);
+                using var dstVec = new VectorOfPointF(dstPoints);
+                using var inlierMask = new Mat();
+
+                using Mat homography = CvInvoke.FindHomography(
+                    srcVec,
+                    dstVec,
+                    RobustEstimationAlgorithm.Ransac,
+                    ransacThreshold,
+                    inlierMask);
+
+                // אם לא נמצאה הומוגרפיה, או שאין מספיק Inliers, עוצרים
+                if (homography == null || homography.IsEmpty) break;
+
+                // שליפת ה-Mask כדי לדעת אילו נקודות נוצלו
+                var maskBytes = new byte[inlierMask.Rows];
+                inlierMask.CopyTo(maskBytes);
+                int inliersCount = maskBytes.Count(b => b != 0);
+
+                if (inliersCount < minMatches) break;
+
+                // --- חישוב פינות המופע הנוכחי ---
+                var tplCorners = new[] {
+            new PointF(0, 0),
+            new PointF(label.TemplateGray.Width, 0),
+            new PointF(label.TemplateGray.Width, label.TemplateGray.Height),
+            new PointF(0, label.TemplateGray.Height)
+        };
+
+                using var tplVec = new VectorOfPointF(tplCorners);
+                using var imgVec = new VectorOfPointF();
+                CvInvoke.PerspectiveTransform(tplVec, imgVec, homography);
+                var corners = imgVec.ToArray();
+
+                // בדיקה שהזיהוי הגיוני (בתוך גבולות התמונה)
+                bool isValid = corners.All(p => p.X >= -10 && p.X < image.Width + 10 && p.Y >= -10 && p.Y < image.Height + 10);
+
+                if (isValid)
+                {
+                    double confidence = (double)inliersCount / remainingMatches.Count;
+                    var resultCorners = corners
+                        .Select(p => new Point2D((int)Math.Round(p.X), (int)Math.Round(p.Y)))
+                        .ToList().AsReadOnly();
+
+                    results.Add(new LabelDetectionResult(
+                        labelName: label.Name,
+                        corners: resultCorners,
+                        confidence: confidence,
+                        inliers: inliersCount,
+                        matches: remainingMatches.Count
+                    ));
+                }
+
+                // --- הצעד הקריטי: הסרת ה-Inliers מרשימת הנקודות שנותרו ---
+                var nextIterationMatches = new List<MDMatch>();
+                for (int i = 0; i < remainingMatches.Count; i++)
+                {
+                    if (maskBytes[i] == 0) // אם הנקודה היא Outlier למופע הנוכחי, נשמור אותה לסיבוב הבא
+                    {
+                        nextIterationMatches.Add(remainingMatches[i]);
+                    }
+                }
+                remainingMatches = nextIterationMatches;
+
+                // הגנה מפני לולאה אינסופית אם ה-Mask לא מסנן כלום
+                if (inliersCount == 0) break;
             }
 
-            using var srcVec = new VectorOfPointF(srcPoints);
-            using var dstVec = new VectorOfPointF(dstPoints);
-            using var inlierMask = new Mat();
-
-            using Mat homography = CvInvoke.FindHomography(
-                srcVec,
-                dstVec,
-                RobustEstimationAlgorithm.Ransac,
-                ransacThreshold,
-                inlierMask);
-
-            if (homography == null || homography.IsEmpty)
-            {
-                Console.WriteLine("homography == null || homography.IsEmpty");
-                return null;
-            }
-
-            // --- Transform template corners ---
-            var tplCorners = new[]
-            {
-                new PointF(0, 0),
-                new PointF(label.TemplateGray.Width, 0),
-                new PointF(label.TemplateGray.Width, label.TemplateGray.Height),
-                new PointF(0, label.TemplateGray.Height)
-            };
-
-            using var tplVec = new VectorOfPointF(tplCorners);
-            using var imgVec = new VectorOfPointF();
-
-            CvInvoke.PerspectiveTransform(tplVec, imgVec, homography);
-            var corners = imgVec.ToArray();
-
-            Console.WriteLine("Validate bounds");
-            // Validate bounds
-            if (!corners.All(p =>
-                p.X >= 0 && p.X < image.Width &&
-                p.Y >= 0 && p.Y < image.Height))
-            {
-                Console.WriteLine("!corners.All .. ");
-                return null;
-            }
-
-
-            Console.WriteLine("Quality metrics");
-            // --- Quality metrics ---
-            var maskBytes = new byte[inlierMask.Rows];
-            inlierMask.CopyTo(maskBytes);
-
-            int inliers = maskBytes.Count(b => b != 0);
-            double confidence = (double)inliers / goodMatches.Count;
-
-            // --- Convert to business result ---
-            var resultCorners = corners
-                .Select(p => new Point2D((int)Math.Round(p.X), (int)Math.Round(p.Y)))
-                .ToList()
-                .AsReadOnly();
-            
-            Console.WriteLine($"resultCorners: {resultCorners}");
-
-            return new LabelDetectionResult(
-                labelName: label.Name,
-                corners: resultCorners,
-                confidence: confidence,
-                inliers: inliers,
-                matches: goodMatches.Count
-            );
+            return results;
         }
 
         public void Dispose()

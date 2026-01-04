@@ -1,11 +1,26 @@
 using Microsoft.AspNetCore.Mvc;
+using StickersDetector.bl.OpenCV;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http; // עבור IFormFile
+using System.IO;                // עבור MemoryStream
+using System.Collections.Generic; // עבור List
+using System.Threading.Tasks;    // עבור Task
+using System;                   // עבור Exception ו-Convert
+
+// Emgu.CV Usings
 using Emgu.CV;
 using Emgu.CV.CvEnum;
-using StickersDetector.bl.OpenCV;
-using StickersDetector.Models.Shapes;
+using StickersDetector.bl.OpenCV; // ה-Namespace של הלוגיקה שלך
 
 namespace StickersDetector.Controllers
 {
+    public class DetectionResponse
+    {
+        public string LabelName { get; set; }
+        public double Confidence { get; set; }
+        public string ImageBase64 { get; set; } // התמונה הגזורה בלבד
+    }
+
     [ApiController]
     [Route("api/detectSticker/v1")]
     public class DetectStickerController : ControllerBase
@@ -20,47 +35,53 @@ namespace StickersDetector.Controllers
         [HttpPost]
         public async Task<IActionResult> DetectSticker([FromForm] IFormFile image, [FromForm] string labelName)
         {
-            Console.WriteLine("Got new Message");
-            // 1. Basic validation
             if (image == null || image.Length == 0) return BadRequest("Image file is missing");
             if (string.IsNullOrEmpty(labelName)) return BadRequest("labelName is required");
-            Console.WriteLine("Got new Message");
 
             try
             {
-                // 2. Read the file into a byte array and convert to an OpenCV Mat
                 using var memoryStream = new MemoryStream();
                 await image.CopyToAsync(memoryStream);
-                byte[] imageBytes = memoryStream.ToArray();
-
+                
                 using var inputImage = new Mat();
-                CvInvoke.Imdecode(imageBytes, ImreadModes.Color, inputImage);
+                // שימוש ב-Unchanged עבור תמונות MONO/Grayscale
+                CvInvoke.Imdecode(memoryStream.ToArray(), ImreadModes.Unchanged, inputImage);
 
                 if (inputImage.IsEmpty) return BadRequest("Invalid image format");
 
+                var detections = _labelDetector.Detect(inputImage, labelName);
 
-                // 3. Perform sticker detection
-                Console.WriteLine($"[DEBUG] Attempting to detect label: '{labelName}'...");
-
-                var detection = _labelDetector.Detect(inputImage, labelName);
-
-                if (detection == null)
+                if (detections == null || detections.Count == 0)
                 {
-                    return NotFound(new { message = $"Label '{labelName}' not detected or confidence too low. detection: {detection}" });
+                    return Ok(new List<DetectionResponse>());
                 }
 
-                // 4. Crop and align the label using the detected corners
-                using var alignedLabel = ImageRotator.ExtractAndAlignLabel(inputImage, detection.Corners);
+                var responseList = new List<DetectionResponse>();
 
-                // 5. Convert the result back to bytes to return the image via API                using var outputStream = new MemoryStream();
-                byte[] resultBytes = CvInvoke.Imencode(".jpg", alignedLabel);
+                foreach (var detection in detections)
+                {
+                    try
+                    {
+                        // חיתוך ויישור
+                        using var alignedLabel = ImageRotator.ExtractAndAlignLabel(inputImage, detection.Corners);
+                        
+                        // קידוד ל-JPG (שומר על ערוץ אחד ב-MONO)
+                        byte[] croppedBytes = CvInvoke.Imencode(".jpg", alignedLabel);
 
-                // Return the image file directly to the client
-                return File(resultBytes, "image/jpeg", $"detected_{labelName}.jpg");
-            }
-            catch (KeyNotFoundException)
-            {
-                return BadRequest($"Label type '{labelName}' is not defined in the system.");
+                        responseList.Add(new DetectionResponse
+                        {
+                            LabelName = detection.LabelName,
+                            Confidence = detection.Confidence,
+                            ImageBase64 = Convert.ToBase64String(croppedBytes)
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[WARNING] Failed to crop detection: {ex.Message}");
+                    }
+                }
+
+                return Ok(responseList);
             }
             catch (Exception ex)
             {
