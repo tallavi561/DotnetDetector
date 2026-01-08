@@ -35,9 +35,12 @@ namespace StickersDetector.Controllers
         [HttpPost]
         public async Task<IActionResult> DetectSticker([FromForm] IFormFile image, [FromForm] string labelName)
         {
+            // calculate start time
+            var startTime = DateTime.Now;
+            Console.WriteLine($"[INFO] Received detection request for label: {labelName}");
             if (image == null || image.Length == 0) return BadRequest("Image file is missing");
             if (string.IsNullOrEmpty(labelName)) return BadRequest("labelName is required");
-
+            Console.WriteLine($"[INFO] Image size: {image.Length} bytes");
             try
             {
                 using var memoryStream = new MemoryStream();
@@ -80,7 +83,9 @@ namespace StickersDetector.Controllers
                         Console.WriteLine($"[WARNING] Failed to crop detection: {ex.Message}");
                     }
                 }
-
+                Console.WriteLine($"[INFO] Detection completed. Found {responseList.Count} instances of label: {labelName}");
+                var endTime = DateTime.Now;
+                Console.WriteLine($"[INFO] Processing time: {(endTime - startTime).TotalMilliseconds} ms");
                 return Ok(responseList);
             }
             catch (Exception ex)

@@ -10,7 +10,9 @@ var builder = WebApplication.CreateBuilder(args);
 // 1. הגדרת רשימת המדבקות כפי שמופיע בהערות שלך
 var definitions = new List<InputLabelDefinition>
 {
-    new InputLabelDefinition("DHL", "labels/DHL.jpg") 
+    new InputLabelDefinition("DHL", "labels/DHL.jpg"),
+    new InputLabelDefinition("FED-EX", "labels/FED-EX.jpg"),
+    new InputLabelDefinition("IsraelPostOffice", "labels/IsraelPostOffice.jpg")
 };
 
 // 2. רישום ה-LabelDetector כ-Singleton
