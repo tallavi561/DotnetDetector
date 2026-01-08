@@ -53,7 +53,9 @@ namespace StickersDetector.Controllers
                 if (inputImage.IsEmpty) return BadRequest("Invalid image format");
 
                 var detections = _labelDetector.Detect(inputImage, labelName);
-
+                // calculate time of detection
+                var detectionTime = DateTime.Now;
+                Console.WriteLine($"[INFO] Detection time: {(detectionTime - startTime).TotalMilliseconds} ms");
                 if (detections == null || detections.Count == 0)
                 {
                     return Ok(new List<DetectionResponse>());
