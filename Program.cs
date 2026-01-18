@@ -3,7 +3,13 @@ using StickersDetector.bl.OpenCV;
 using Emgu.CV;
 using Emgu.CV.Structure;
 using System.Drawing;
-
+int OPENCV_NUM_THREADS = 4;
+int OMP_NUM_THREADS = 4;
+Console.WriteLine("Starting application...");
+Environment.SetEnvironmentVariable("OPENCV_NUM_THREADS", OPENCV_NUM_THREADS.ToString());
+Environment.SetEnvironmentVariable("OMP_NUM_THREADS", OMP_NUM_THREADS.ToString());
+Console.WriteLine("Environment variables for OpenCV threading set to " +
+    $"OPENCV_NUM_THREADS={OPENCV_NUM_THREADS}, OMP_NUM_THREADS={OMP_NUM_THREADS}");
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -18,7 +24,6 @@ var definitions = new List<InputLabelDefinition>
 // 2. רישום ה-LabelDetector כ-Singleton
 // השתמשתי ב-Singleton כי ציינת שזה "אתחול כבד" - כך זה יקרה רק פעם אחת בהרצת האפליקציה
 builder.Services.AddSingleton(new LabelDetector(definitions));
-
 
 // TEST
 var imagesBasePaths = "example-pictures/";

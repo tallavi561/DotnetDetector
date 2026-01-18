@@ -30,6 +30,7 @@ namespace StickersDetector.bl.OpenCV
             _sift = new SIFT(nFeatures: 1400, nOctaveLayers: 3, contrastThreshold: 0.04, edgeThreshold: 10, sigma: 1.6);
             _labels = new Dictionary<string, LabelModel>();
 
+
             foreach (var def in labelDefinitions)
             {
                 using var templateGray = CvInvoke.Imread(def.ImagePath, ImreadModes.Grayscale);
@@ -44,35 +45,51 @@ namespace StickersDetector.bl.OpenCV
         }
 
         public List<LabelDetectionResult> Detect(
-          Mat image,
-          string labelName,
-          int minMatches = 15,
-          double ratioThreshold = 0.7,
-          double ransacThreshold = 5.0,
-          int maxProcessingDimension = 1000)
+                  Mat image,
+                  string labelName,
+                  int minMatches = 15,
+                  double ratioThreshold = 0.7,
+                  double ransacThreshold = 5.0,
+                  int maxProcessingDimension = 1000)
         {
             var results = new List<LabelDetectionResult>();
             if (image == null || image.IsEmpty) return results;
             if (!_labels.TryGetValue(labelName, out var label)) return results;
 
-            // --- 1. Dynamic Resize (Performance Gain) ---
+            Stopwatch sw = Stopwatch.StartNew();
+            Stopwatch totalSw = Stopwatch.StartNew();
+
+            // --- 1. Dynamic Resize ---
             double scale = CalculateScale(image.Size, maxProcessingDimension);
             using var workImage = new Mat();
             CvInvoke.Resize(image, workImage, new Size(), scale, scale, Inter.Area);
+
+            Console.WriteLine($"[Timer] Resize: {sw.ElapsedMilliseconds}ms");
+            sw.Restart();
 
             // --- 2. SIFT Extraction (The Main Bottleneck) ---
             using var sceneKeypoints = new VectorOfKeyPoint();
             using var sceneDescriptors = new Mat();
             _sift.DetectAndCompute(workImage, null, sceneKeypoints, sceneDescriptors, false);
 
-            if (sceneDescriptors.IsEmpty || sceneKeypoints.Size < minMatches)
-                return results;
+            Console.WriteLine($"[Timer] SIFT DetectAndCompute: {sw.ElapsedMilliseconds}ms (Found {sceneKeypoints.Size} keypoints)");
+            sw.Restart();
 
-            // --- 3 & 4. Matching & Ratio Test ---
+            if (sceneDescriptors.IsEmpty || sceneKeypoints.Size < minMatches)
+            {
+                Console.WriteLine("[Timer] Detection aborted: Not enough keypoints.");
+                return results;
+            }
+
+            // --- 3. Matching (BFMatcher) ---
             using var matcher = new BFMatcher(DistanceType.L2);
             using var knnMatches = new VectorOfVectorOfDMatch();
             matcher.KnnMatch(label.Descriptors, sceneDescriptors, knnMatches, 2);
 
+            Console.WriteLine($"[Timer] KNN Matching: {sw.ElapsedMilliseconds}ms");
+            sw.Restart();
+
+            // --- 4. Ratio Test ---
             var remainingMatches = new List<MDMatch>();
             for (int i = 0; i < knnMatches.Size; i++)
             {
@@ -81,9 +98,16 @@ namespace StickersDetector.bl.OpenCV
                     remainingMatches.Add(knnMatches[i][0]);
             }
 
-            // --- 5. Multi-instance Loop ---
+            Console.WriteLine($"[Timer] Ratio Test: {sw.ElapsedMilliseconds}ms (Matches remaining: {remainingMatches.Count})");
+            sw.Restart();
+
+            // --- 5. Multi-instance Loop (Homography & RANSAC) ---
+            int iteration = 0;
             while (remainingMatches.Count >= minMatches)
             {
+                iteration++;
+                Stopwatch iterationSw = Stopwatch.StartNew();
+
                 var srcPoints = new PointF[remainingMatches.Count];
                 var dstPoints = new PointF[remainingMatches.Count];
 
@@ -105,11 +129,11 @@ namespace StickersDetector.bl.OpenCV
                 if (inliersCount < minMatches) break;
 
                 var tplCorners = new[] {
-            new PointF(0, 0),
-            new PointF(label.TemplateGray.Width, 0),
-            new PointF(label.TemplateGray.Width, label.TemplateGray.Height),
-            new PointF(0, label.TemplateGray.Height)
-        };
+                    new PointF(0, 0),
+                    new PointF(label.TemplateGray.Width, 0),
+                    new PointF(label.TemplateGray.Width, label.TemplateGray.Height),
+                    new PointF(0, label.TemplateGray.Height)
+                };
 
                 using var tplVec = new VectorOfPointF(tplCorners);
                 using var imgVec = new VectorOfPointF();
@@ -128,29 +152,29 @@ namespace StickersDetector.bl.OpenCV
                 }
                 else
                 {
-                    // אם הפוליגון לא תקין, צא מהלולאה
                     break;
                 }
 
-                // --- Geometric Filter: הסר רק inliers שנמצאו ---
                 var nextIterationMatches = new List<MDMatch>();
                 byte[] maskBytes = new byte[inlierMask.Rows];
                 inlierMask.CopyTo(maskBytes);
 
                 for (int i = 0; i < remainingMatches.Count; i++)
                 {
-                    // שמור רק outliers (matches שלא שימשו בהומוגרפיה הנוכחית)
                     if (maskBytes[i] == 0)
                     {
                         nextIterationMatches.Add(remainingMatches[i]);
                     }
                 }
 
-                // אם לא הצלחנו להסיר matches, צא מהלולאה
                 if (nextIterationMatches.Count == remainingMatches.Count) break;
-
                 remainingMatches = nextIterationMatches;
+
+                Console.WriteLine($"[Timer] Loop Iteration {iteration}: {iterationSw.ElapsedMilliseconds}ms");
             }
+
+            Console.WriteLine($"[Timer] Total Multi-instance Loop: {sw.ElapsedMilliseconds}ms");
+            Console.WriteLine($"[Timer] === TOTAL DETECTION TIME: {totalSw.ElapsedMilliseconds}ms ===");
 
             return results;
         }
