@@ -19,6 +19,43 @@ var definitions = new List<InputLabelDefinition>
 // השתמשתי ב-Singleton כי ציינת שזה "אתחול כבד" - כך זה יקרה רק פעם אחת בהרצת האפליקציה
 builder.Services.AddSingleton(new LabelDetector(definitions));
 
+
+// TEST
+var imagesBasePaths = "example-pictures/";
+var imagesPaths = new List<string>
+{
+    "DHL", "FED-EX", "IsraelPostOffice"
+};
+var imagesName = "1.jpg";
+var allImagesPaths = imagesPaths
+    .Select(name => imagesBasePaths + name + "/" + imagesName)
+    .ToList();
+
+
+// var detection = detector.Detect(image, "DHL");
+using var detector = new LabelDetector(definitions);
+for (int i = 0; i < allImagesPaths.Count; i++)
+{
+    var imagesPath = allImagesPaths[i];
+
+    using var image = CvInvoke.Imread(imagesPath);
+    if (image.IsEmpty)
+    {
+        Console.WriteLine($"Failed to load image: {imagesPath}");
+        continue;
+    }
+    // get the time before detection
+    var startTime = DateTime.Now;
+    var comparedLabel = imagesPaths[i];
+    var detection = detector.Detect(image, comparedLabel);
+    var endTime = DateTime.Now;
+    Console.WriteLine($"Detection time for {comparedLabel}: {(endTime - startTime).TotalMilliseconds} ms");
+}
+
+
+
+
+
 // הוספת תמיכה בקונטרולרים
 builder.Services.AddControllers();
 
@@ -53,8 +90,6 @@ app.Run();
 // using var detector = new LabelDetector(definitions);
 
 // // 3️⃣ טעינת תמונת הקלט
-// var imagePath = "example-pictures/3.jpg";
-// using var image = CvInvoke.Imread(imagePath);
 
 // if (image.IsEmpty)
 // {
@@ -63,7 +98,6 @@ app.Run();
 // }
 
 // // 4️⃣ זיהוי המדבקה "A"
-// var detection = detector.Detect(image, "DHL");
 
 // // 5️⃣ טיפול בתוצאה
 // if (detection == null)

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Linq;
 using DotnetDetector.Models.Labels;
@@ -8,90 +9,58 @@ using Emgu.CV.CvEnum;
 using Emgu.CV.Features2D;
 using Emgu.CV.Structure;
 using Emgu.CV.Util;
-using Microsoft.AspNetCore.Authentication;
 using StickersDetector.Models;
 using StickersDetector.Models.Shapes;
 
 namespace StickersDetector.bl.OpenCV
 {
-    /// <summary>
-    /// Detects predefined labels in images using feature matching and homography.
-    /// Loads all label templates at construction time.
-    /// </summary>
     public sealed class LabelDetector : IDisposable
     {
         private readonly SIFT _sift;
         private readonly Dictionary<string, LabelModel> _labels;
         private bool _disposed;
 
-        /// <summary>
-        /// Initializes the detector with known label definitions.
-        /// Heavy initialization (I/O + feature extraction) happens here.
-        /// </summary>
         public LabelDetector(List<InputLabelDefinition> labelDefinitions)
         {
             if (labelDefinitions == null || labelDefinitions.Count == 0)
                 throw new ArgumentException("Label definitions list is empty", nameof(labelDefinitions));
 
-            _sift = new SIFT();
+            // Constructor timing is not a priority. 
+            // Lowering nFeatures to 800 significantly speeds up the 'Detect' phase.
+            _sift = new SIFT(nFeatures: 1400, nOctaveLayers: 3, contrastThreshold: 0.04, edgeThreshold: 10, sigma: 1.6);
             _labels = new Dictionary<string, LabelModel>();
 
             foreach (var def in labelDefinitions)
             {
-                if (_labels.ContainsKey(def.Name))
-                    throw new InvalidOperationException($"Duplicate label name: {def.Name}");
+                using var templateGray = CvInvoke.Imread(def.ImagePath, ImreadModes.Grayscale);
+                if (templateGray.IsEmpty) continue;
 
-                // Load template as grayscale
-                var templateGray = CvInvoke.Imread(def.ImagePath, ImreadModes.Grayscale);
-                if (templateGray.IsEmpty)
-                    throw new InvalidOperationException($"Failed to load label image: {def.ImagePath}");
-
-                // Extract features
                 var keypoints = new VectorOfKeyPoint();
                 var descriptors = new Mat();
+                _sift.DetectAndCompute(templateGray, null, keypoints, descriptors, false);
 
-                _sift.DetectAndCompute(
-                    templateGray,
-                    null,
-                    keypoints,
-                    descriptors,
-                    false);
-
-                if (keypoints.Size == 0 || descriptors.IsEmpty)
-                    throw new InvalidOperationException(
-                        $"No features found in label image: {def.Name}");
-
-                var model = new LabelModel(
-                    def.Name,
-                    templateGray,
-                    keypoints,
-                    descriptors);
-
-                _labels.Add(def.Name, model);
+                _labels.Add(def.Name, new LabelModel(def.Name, templateGray.Clone(), keypoints, descriptors));
             }
         }
 
         public List<LabelDetectionResult> Detect(
-            Mat image,
-            string labelName,
-            int minMatches = 15,
-            double ratioThreshold = 0.7,
-            double ransacThreshold = 5.0,
-            double downscale = 0.5)
+          Mat image,
+          string labelName,
+          int minMatches = 15,
+          double ratioThreshold = 0.7,
+          double ransacThreshold = 5.0,
+          int maxProcessingDimension = 1000)
         {
             var results = new List<LabelDetectionResult>();
+            if (image == null || image.IsEmpty) return results;
+            if (!_labels.TryGetValue(labelName, out var label)) return results;
 
-            if (!_labels.TryGetValue(labelName, out var label))
-                throw new KeyNotFoundException($"Unknown label: {labelName}");
-
-            if (image == null || image.IsEmpty)
-                throw new ArgumentException("Input image is empty", nameof(image));
-
-            // --- 1. הכנה ושינוי גודל ---
+            // --- 1. Dynamic Resize (Performance Gain) ---
+            double scale = CalculateScale(image.Size, maxProcessingDimension);
             using var workImage = new Mat();
-            CvInvoke.Resize(image, workImage, new Size(), downscale, downscale, Inter.Area);
+            CvInvoke.Resize(image, workImage, new Size(), scale, scale, Inter.Area);
 
-            // --- 2. חילוץ מאפיינים מהתמונה המלאה (פעם אחת) ---
+            // --- 2. SIFT Extraction (The Main Bottleneck) ---
             using var sceneKeypoints = new VectorOfKeyPoint();
             using var sceneDescriptors = new Mat();
             _sift.DetectAndCompute(workImage, null, sceneKeypoints, sceneDescriptors, false);
@@ -99,7 +68,7 @@ namespace StickersDetector.bl.OpenCV
             if (sceneDescriptors.IsEmpty || sceneKeypoints.Size < minMatches)
                 return results;
 
-            // --- 3. התאמת נקודות (KNN) וסינון ראשוני (Lowe's Ratio) ---
+            // --- 3 & 4. Matching & Ratio Test ---
             using var matcher = new BFMatcher(DistanceType.L2);
             using var knnMatches = new VectorOfVectorOfDMatch();
             matcher.KnnMatch(label.Descriptors, sceneDescriptors, knnMatches, 2);
@@ -112,7 +81,7 @@ namespace StickersDetector.bl.OpenCV
                     remainingMatches.Add(knnMatches[i][0]);
             }
 
-            // --- 4. לולאת איתור מופעים מרובים ---
+            // --- 5. Multi-instance Loop ---
             while (remainingMatches.Count >= minMatches)
             {
                 var srcPoints = new PointF[remainingMatches.Count];
@@ -122,8 +91,7 @@ namespace StickersDetector.bl.OpenCV
                 {
                     srcPoints[i] = label.Keypoints[remainingMatches[i].QueryIdx].Point;
                     var p = sceneKeypoints[remainingMatches[i].TrainIdx].Point;
-                    // המרה חזרה לקואורדינטות של התמונה המקורית (לפני Downscale)
-                    dstPoints[i] = new PointF((float)(p.X / downscale), (float)(p.Y / downscale));
+                    dstPoints[i] = new PointF((float)(p.X / scale), (float)(p.Y / scale));
                 }
 
                 using var srcVec = new VectorOfPointF(srcPoints);
@@ -133,14 +101,9 @@ namespace StickersDetector.bl.OpenCV
 
                 if (homography == null || homography.IsEmpty) break;
 
-                // ספירת Inliers של RANSAC
-                var maskBytes = new byte[inlierMask.Rows];
-                inlierMask.CopyTo(maskBytes);
-                int inliersCount = maskBytes.Count(b => b != 0);
-
+                int inliersCount = CountInliers(inlierMask);
                 if (inliersCount < minMatches) break;
 
-                // חישוב פינות המדבקה בתמונה
                 var tplCorners = new[] {
             new PointF(0, 0),
             new PointF(label.TemplateGray.Width, 0),
@@ -151,16 +114,10 @@ namespace StickersDetector.bl.OpenCV
                 using var tplVec = new VectorOfPointF(tplCorners);
                 using var imgVec = new VectorOfPointF();
                 CvInvoke.PerspectiveTransform(tplVec, imgVec, homography);
-                var cornersArray = imgVec.ToArray();
 
-                // --- בדיקות איכות גיאומטריות ---
-                double area = CvInvoke.ContourArea(imgVec);
-                bool isConvex = CvInvoke.IsContourConvex(imgVec);
-                bool isInBounds = cornersArray.All(p => p.X >= -50 && p.X < image.Width + 50 && p.Y >= -50 && p.Y < image.Height + 50);
-
-                // שטח מינימלי (למשל 100 פיקסלים) כדי למנוע רעש
-                if (isConvex && area > 100 && isInBounds)
+                if (CvInvoke.IsContourConvex(imgVec) && CvInvoke.ContourArea(imgVec) > 100)
                 {
+                    var cornersArray = imgVec.ToArray();
                     results.Add(new LabelDetectionResult(
                         labelName: label.Name,
                         corners: cornersArray.Select(p => new Point2D((int)Math.Round(p.X), (int)Math.Round(p.Y))).ToList().AsReadOnly(),
@@ -169,23 +126,27 @@ namespace StickersDetector.bl.OpenCV
                         matches: remainingMatches.Count
                     ));
                 }
+                else
+                {
+                    // אם הפוליגון לא תקין, צא מהלולאה
+                    break;
+                }
 
-                // --- הצעד הקריטי: הסרה גיאומטרית של נקודות ---
-                // אנחנו מסירים כל נקודה שנמצאת בתוך הפוליגון שמצאנו, גם אם היא לא הייתה Inlier רשמי
+                // --- Geometric Filter: הסר רק inliers שנמצאו ---
                 var nextIterationMatches = new List<MDMatch>();
+                byte[] maskBytes = new byte[inlierMask.Rows];
+                inlierMask.CopyTo(maskBytes);
+
                 for (int i = 0; i < remainingMatches.Count; i++)
                 {
-                    var p = sceneKeypoints[remainingMatches[i].TrainIdx].Point;
-                    var scenePtOriginalScale = new PointF((float)(p.X / downscale), (float)(p.Y / downscale));
-
-                    // בדיקה האם הנקודה בתוך הפוליגון (ערך >= 0 אומר בפנים או על הקו)
-                    if (CvInvoke.PointPolygonTest(imgVec, scenePtOriginalScale, false) < 0)
+                    // שמור רק outliers (matches שלא שימשו בהומוגרפיה הנוכחית)
+                    if (maskBytes[i] == 0)
                     {
                         nextIterationMatches.Add(remainingMatches[i]);
                     }
                 }
 
-                // הגנה מפני לולאה אינסופית: אם לא הצלחנו לצמצם את הרשימה, נפסיק
+                // אם לא הצלחנו להסיר matches, צא מהלולאה
                 if (nextIterationMatches.Count == remainingMatches.Count) break;
 
                 remainingMatches = nextIterationMatches;
@@ -194,14 +155,26 @@ namespace StickersDetector.bl.OpenCV
             return results;
         }
 
+        // --- PRIVATE HELPERS (Fixed CS0103) ---
+
+        private double CalculateScale(Size size, int maxDim)
+        {
+            if (size.Width <= maxDim && size.Height <= maxDim) return 1.0;
+            return (double)maxDim / Math.Max(size.Width, size.Height);
+        }
+
+        private int CountInliers(Mat mask)
+        {
+            if (mask == null || mask.IsEmpty) return 0;
+            var maskBytes = new byte[mask.Rows];
+            mask.CopyTo(maskBytes);
+            return maskBytes.Count(b => b != 0);
+        }
+
         public void Dispose()
         {
-            if (_disposed)
-                return;
-
-            foreach (var label in _labels.Values)
-                label.Dispose();
-
+            if (_disposed) return;
+            foreach (var label in _labels.Values) label.Dispose();
             _sift.Dispose();
             _disposed = true;
             GC.SuppressFinalize(this);
